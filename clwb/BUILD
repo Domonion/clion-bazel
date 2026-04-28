@@ -176,7 +176,13 @@ clwb_headless_test(
 clwb_headless_test(
     name = "lib_cpp_headless_test",
     srcs = ["tests/headlesstests/com/google/idea/blaze/clwb/LibCppTest.java"],
-    project = "simple",
+    project = "lib_cpp",
+    workspace_files = [
+        "tests/projects/lib_cpp/MODULE.bazel",
+        "//clwb/tests/projects/lib_cpp/main:BUILD",
+        "//clwb/tests/projects/lib_cpp/main:main.cc",
+        "//clwb/tests/projects/lib_cpp/main:shadow/string.h",
+    ],
 )
 
 clwb_headless_test(

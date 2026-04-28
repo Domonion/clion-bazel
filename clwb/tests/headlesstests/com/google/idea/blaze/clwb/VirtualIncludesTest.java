@@ -45,6 +45,7 @@ public class VirtualIncludesTest extends ClwbHeadlessTestCase {
     errors.assertNoErrors();
 
     checkIncludes();
+    checkHeaderOnlyIncludes();
     checkImplDeps();
     checkCoptIncludes();
   }
@@ -114,6 +115,15 @@ public class VirtualIncludesTest extends ClwbHeadlessTestCase {
 
     assertThat(findProjectFile("lib/raw_files/quote/raw_quote.h"))
         .isEqualTo(resolveHeader("raw_quote.h", compilerSettings));
+  }
+
+  private void checkHeaderOnlyIncludes() {
+    final var compilerSettings = findFileCompilerSettings("main/header_only.h");
+
+    assertContainsHeader("strip_absolut/strip_absolut.h", compilerSettings);
+
+    assertThat(findProjectFile("lib/strip_absolut/strip_absolut.h"))
+        .isEqualTo(resolveHeader("strip_absolut/strip_absolut.h", compilerSettings));
   }
 
   private void checkImplDeps() {

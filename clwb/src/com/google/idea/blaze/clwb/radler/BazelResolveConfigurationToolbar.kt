@@ -45,7 +45,6 @@ import com.jetbrains.cidr.lang.workspace.OCResolveConfiguration
 import com.jetbrains.cidr.lang.workspace.OCResolveConfigurations
 import com.jetbrains.cidr.lang.workspace.OCWorkspace
 import com.jetbrains.cidr.lang.workspace.OCWorkspaceListener
-import org.jetbrains.letsPlot.commons.intern.filterNotNullValues
 
 class BazelResolveConfigurationWidgetProvider : InspectionWidgetActionProvider {
 
@@ -193,8 +192,8 @@ private class BazelConfigSwitchComboAction(
 
     val configurations = OCWorkspace.getInstance(project)
       .getConfigurationsForFile(file)
-      .associateWith { toSwitcherConfig(projectData, it) }
-      .filterNotNullValues()
+      .mapNotNull { config -> toSwitcherConfig(projectData, config)?.let { config to it } }
+      .toMap()
 
     if (configurations.isEmpty()) return null
     val selected = OCResolveConfigurations.findPreselectedOrSuitableConfiguration(project, configurations.keys)

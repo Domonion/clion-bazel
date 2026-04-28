@@ -21,6 +21,8 @@ import com.google.common.collect.ImmutableList;
 import com.google.idea.blaze.base.ideinfo.CIdeInfo;
 import com.google.idea.blaze.base.ideinfo.TargetKey;
 import com.google.idea.blaze.base.model.primitives.ExecutionRootPath;
+import java.util.LinkedHashSet;
+import java.util.function.Function;
 
 /** Data for clustering {@link BlazeResolveConfiguration} by "equivalence". */
 @AutoValue
@@ -52,6 +54,15 @@ public abstract class BlazeResolveConfigurationData {
       CIdeInfo cIdeInfo,
       BlazeCompilerSettings compilerSettings
   ) {
+    return create(targetKey, cIdeInfo, compilerSettings, ImmutableList.of());
+  }
+
+  static BlazeResolveConfigurationData create(
+      TargetKey targetKey,
+      CIdeInfo cIdeInfo,
+      BlazeCompilerSettings compilerSettings,
+      ImmutableList<CIdeInfo.CompilationContext> additionalCompilationContexts
+  ) {
     final var ruleCtx = cIdeInfo.ruleContext();
     final var compilationCtx = cIdeInfo.compilationContext();
 
@@ -61,11 +72,40 @@ public abstract class BlazeResolveConfigurationData {
         .setLocalCopts(ruleCtx.copts())
         .setLocalConlyopts(ruleCtx.conlyopts())
         .setLocalCxxopts(ruleCtx.cxxopts())
-        .setTransitiveIncludeDirectories(compilationCtx.includes())
-        .setTransitiveQuoteIncludeDirectories(compilationCtx.quoteIncludes())
-        .setTransitiveDefines(compilationCtx.defines())
-        .setTransitiveSystemIncludeDirectories(compilationCtx.systemIncludes())
+        .setTransitiveIncludeDirectories(
+            mergeCompilationContextValues(
+                compilationCtx.includes(),
+                additionalCompilationContexts,
+                CIdeInfo.CompilationContext::includes))
+        .setTransitiveQuoteIncludeDirectories(
+            mergeCompilationContextValues(
+                compilationCtx.quoteIncludes(),
+                additionalCompilationContexts,
+                CIdeInfo.CompilationContext::quoteIncludes))
+        .setTransitiveDefines(
+            mergeCompilationContextValues(
+                compilationCtx.defines(),
+                additionalCompilationContexts,
+                CIdeInfo.CompilationContext::defines))
+        .setTransitiveSystemIncludeDirectories(
+            mergeCompilationContextValues(
+                compilationCtx.systemIncludes(),
+                additionalCompilationContexts,
+                CIdeInfo.CompilationContext::systemIncludes))
         .build();
+  }
+
+  private static <T> ImmutableList<T> mergeCompilationContextValues(
+      ImmutableList<T> baseValues,
+      ImmutableList<CIdeInfo.CompilationContext> additionalCompilationContexts,
+      Function<CIdeInfo.CompilationContext, ImmutableList<T>> valueGetter
+  ) {
+    final var values = new LinkedHashSet<T>();
+    values.addAll(baseValues);
+    for (final var context : additionalCompilationContexts) {
+      values.addAll(valueGetter.apply(context));
+    }
+    return ImmutableList.copyOf(values);
   }
 
   public static Builder builder() {
