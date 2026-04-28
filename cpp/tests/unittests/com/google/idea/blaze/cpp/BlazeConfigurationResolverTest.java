@@ -63,6 +63,7 @@ import com.google.idea.blaze.base.settings.BlazeImportSettings.ProjectType;
 import com.google.idea.blaze.base.settings.BlazeImportSettingsManager;
 import com.google.idea.blaze.base.sync.SyncCache;
 import com.google.idea.blaze.base.sync.data.BlazeProjectDataManager;
+import com.google.idea.blaze.base.sync.workspace.ExecutionRootPathResolver;
 import com.google.idea.blaze.base.sync.workspace.WorkspaceHelper;
 import com.google.idea.common.experiments.ExperimentService;
 import com.google.idea.common.experiments.MockExperimentService;
@@ -82,7 +83,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.Mockito;
@@ -100,6 +103,7 @@ public class BlazeConfigurationResolverTest extends BlazeTestCase {
   private MockXcodeSettingsProvider xcodeSettingsProvider;
   private LocalFileSystem mockFileSystem;
   private FileOperationProvider spyFileOperationProvider;
+  @Rule public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Override
   protected void initTest(Container applicationServices, Container projectServices) {
@@ -171,6 +175,32 @@ public class BlazeConfigurationResolverTest extends BlazeTestCase {
   }
 
   @Test
+  public void resolveCompilerExecutable_usesBazelManagedClangFromOutputBase() throws IOException {
+    final var outputBase = temporaryFolder.newFolder("output_base");
+    final var executionRoot = new File(outputBase, "execroot/main");
+    assertThat(executionRoot.mkdirs()).isTrue();
+
+    final var clang =
+        new File(
+            outputBase,
+            "external/+cc_toolchains_extension+clang_toolchains-clang-linux-x86_64/bin/clang");
+    assertThat(clang.getParentFile().mkdirs()).isTrue();
+    assertThat(clang.createNewFile()).isTrue();
+    assertThat(clang.setExecutable(true)).isTrue();
+
+    final var compilerPath = ExecutionRootPath.create("clang");
+    final var resolver = mock(ExecutionRootPathResolver.class);
+    when(resolver.getExecutionRoot()).thenReturn(executionRoot);
+    when(resolver.resolveExecutionRootPath(compilerPath))
+        .thenReturn(new File(executionRoot, "missing/clang"));
+
+    assertThat(
+            BlazeConfigurationToolchainResolver.resolveCompilerExecutable(
+                context, resolver, compilerPath))
+        .isEqualTo(clang);
+  }
+
+  @Test
   public void testEmptyProject() {
     ProjectView projectView = projectView(directories(), targets());
     TargetMap targetMap = TargetMapBuilder.builder().build();
@@ -206,6 +236,54 @@ public class BlazeConfigurationResolverTest extends BlazeTestCase {
                     ImmutableList.of(gen("foo/bar/library.cc")),
                     "//:toolchain"))
             .build();
+    assertThatResolving(projectView, targetMap).producesNoConfigurations();
+  }
+
+  @Test
+  public void testTargetWithHeaderOnlySources() {
+    ProjectView projectView = projectView(directories("foo/bar"), targets("//foo/bar:library"));
+    VirtualFile header = createVirtualFile("/root/foo/bar/library.h");
+    ExecutionRootPath dependencyInclude =
+        ExecutionRootPath.create("bazel-out/foo/dep/_virtual_includes/headers");
+    TargetMap targetMap =
+        TargetMapBuilder.builder()
+            .addTarget(createCcToolchain())
+            .addTarget(
+                createCcTargetWithIncludes(
+                    "//foo/dep:headers",
+                    CppBlazeRules.RuleTypes.CC_LIBRARY.getKind(),
+                    ImmutableList.of(dependencyInclude),
+                    "//:toolchain"))
+            .addTarget(
+                createCcHeaderTarget(
+                        "//foo/bar:library",
+                        CppBlazeRules.RuleTypes.CC_LIBRARY.getKind(),
+                        ImmutableList.of(src("foo/bar/library.h")),
+                        "//:toolchain")
+                    .addDependency("//foo/dep:headers"))
+            .build();
+
+    assertThatResolving(projectView, targetMap).producesConfigurationsFor("//foo/bar:library");
+    BlazeResolveConfiguration configuration = resolverResult.getAllConfigurations().get(0);
+    assertThat(configuration.getSources(configuration.getTargets().get(0))).containsExactly(header);
+    assertThat(configuration.getConfigurationData().transitiveIncludeDirectories())
+        .contains(dependencyInclude);
+  }
+
+  @Test
+  public void testTargetWithGeneratedHeadersOnly() {
+    ProjectView projectView = projectView(directories("foo/bar"), targets("//foo/bar:library"));
+    TargetMap targetMap =
+        TargetMapBuilder.builder()
+            .addTarget(createCcToolchain())
+            .addTarget(
+                createCcHeaderTarget(
+                    "//foo/bar:library",
+                    CppBlazeRules.RuleTypes.CC_LIBRARY.getKind(),
+                    ImmutableList.of(gen("foo/bar/library.h")),
+                    "//:toolchain"))
+            .build();
+
     assertThatResolving(projectView, targetMap).producesNoConfigurations();
   }
 
@@ -944,6 +1022,34 @@ public class BlazeConfigurationResolverTest extends BlazeTestCase {
         .build();
 
     return targetInfo.setCInfo(CIdeInfo.builder().setRuleContext(ruleContext));
+  }
+
+  private static TargetIdeInfo.Builder createCcHeaderTarget(
+      String label, Kind kind, ImmutableList<ArtifactLocation> headers, String toolchainDep) {
+    TargetIdeInfo.Builder targetInfo =
+        TargetIdeInfo.builder().setLabel(label).setKind(kind).addDependency(toolchainDep);
+
+    final var ruleContext = CIdeInfo.RuleContext.builder()
+        .setHeaders(headers)
+        .build();
+
+    return targetInfo.setCInfo(CIdeInfo.builder().setRuleContext(ruleContext));
+  }
+
+  private static TargetIdeInfo.Builder createCcTargetWithIncludes(
+      String label,
+      Kind kind,
+      ImmutableList<ExecutionRootPath> includes,
+      String toolchainDep) {
+    TargetIdeInfo.Builder targetInfo =
+        TargetIdeInfo.builder().setLabel(label).setKind(kind).addDependency(toolchainDep);
+
+    final var compilationContext =
+        CIdeInfo.CompilationContext.builder()
+            .setIncludes(includes)
+            .build();
+
+    return targetInfo.setCInfo(CIdeInfo.builder().setCompilationContext(compilationContext));
   }
 
   private static TargetIdeInfo.Builder createCcToolchain() {

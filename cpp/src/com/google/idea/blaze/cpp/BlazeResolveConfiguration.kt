@@ -20,6 +20,7 @@ import com.google.common.collect.ImmutableMap
 import com.google.idea.blaze.base.ideinfo.TargetKey
 import com.google.idea.blaze.base.io.VirtualFileSystemProvider
 import com.google.idea.blaze.base.model.BlazeProjectData
+import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import com.jetbrains.cidr.lang.CLanguageKind
@@ -66,7 +67,9 @@ data class BlazeResolveConfiguration(
     }
 
     if (OCFileTypeHelpers.isHeaderFile(fileName)) {
-      return getLanguageKind(SourceFileFinder.findAndGetSourceFileForHeaderFile(project, sourceOrHeaderFile))
+      return ReadAction.compute<OCLanguageKind, RuntimeException> {
+        getLanguageKind(SourceFileFinder.findAndGetSourceFileForHeaderFile(project, sourceOrHeaderFile))
+      }
     }
 
     return null
@@ -124,8 +127,9 @@ private fun computeSources(
   for (source in ideInfo.sources) {
     val path = blazeProjectData.artifactLocationDecoder().decode(source).toPath()
 
-    val virtualFile = VirtualFileSystemProvider.getInstance().system.findFileByNioFile(path)
-    if (virtualFile == null || !OCFileTypeHelpers.isSourceFile(virtualFile.name)) {
+    val fileSystem = VirtualFileSystemProvider.getInstance().system
+    val virtualFile = fileSystem.findFileByNioFile(path) ?: fileSystem.refreshAndFindFileByNioFile(path)
+    if (virtualFile == null || !isSourceOrHeaderFile(virtualFile.name)) {
       continue
     }
 
@@ -133,4 +137,8 @@ private fun computeSources(
   }
 
   return builder.build()
+}
+
+private fun isSourceOrHeaderFile(fileName: String): Boolean {
+  return OCFileTypeHelpers.isSourceFile(fileName) || OCFileTypeHelpers.isHeaderFile(fileName)
 }

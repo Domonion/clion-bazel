@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 
 cc_binary(
     name = "main",
@@ -34,4 +34,11 @@ cc_binary(
             "-iquotelib/raw_files/quote",
         ],
     }),
+)
+
+cc_library(
+    name = "header_only",
+    hdrs = ["header_only.h"],
+    visibility = ["//visibility:public"],
+    deps = ["//lib/strip_absolut:lib"],
 )

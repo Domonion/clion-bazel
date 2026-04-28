@@ -25,6 +25,7 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.jetbrains.cidr.lang.CustomHeaderProvider;
 import com.jetbrains.cidr.lang.preprocessor.OCResolveRootAndConfiguration;
+import com.jetbrains.cidr.lang.workspace.OCCompilerSettings;
 import com.jetbrains.cidr.lang.workspace.OCResolveConfiguration;
 import java.io.File;
 import java.util.Optional;
@@ -114,5 +115,17 @@ public class BlazeCustomHeaderProvider extends CustomHeaderProvider {
   public VirtualFile getCustomSerializedHeaderFile(
       String serializationPath, Project project, VirtualFile currentFile) {
     return null;
+  }
+
+  @Nullable
+  @Override
+  public OCCompilerSettings getCompilerSettings(
+      OCResolveConfiguration configuration, OCResolveRootAndConfiguration rootAndConfig) {
+    if (rootAndConfig == null
+        || !BlazeToolchainHeaderResolveConfigurationProvider.isBazelToolchainHeaderInConfiguration(
+            configuration, rootAndConfig.getRootFile())) {
+      return null;
+    }
+    return configuration.getCompilerSettings(rootAndConfig.getKind(), rootAndConfig.getRootFile());
   }
 }

@@ -47,7 +47,7 @@ def clwb_integration_test(name, srcs, deps = []):
         deps = deps + ["//cpp"],
     )
 
-def clwb_headless_test(name, srcs, project = None, example = None, deps = [], last_green = True):
+def clwb_headless_test(name, srcs, project = None, example = None, deps = [], last_green = True, workspace_files = None):
     runner = name + "_runner"
 
     _integration_test_suite(
@@ -61,10 +61,10 @@ def clwb_headless_test(name, srcs, project = None, example = None, deps = [], la
 
     if project != None:
         workspace_path = "tests/projects/" + project
-        workspace_files = None
+        selected_workspace_files = workspace_files
     elif example != None:
         workspace_path = "examples/cpp/" + example
-        workspace_files = ["//examples/cpp:" + example]
+        selected_workspace_files = ["//examples/cpp:" + example]
     else:
         fail("neither project nor example is defined")
 
@@ -73,11 +73,11 @@ def clwb_headless_test(name, srcs, project = None, example = None, deps = [], la
         test_runner = runner,
         last_green = last_green,
         workspace_path = workspace_path,
-        workspace_files = workspace_files,
+        workspace_files = selected_workspace_files,
         env = {
             # disables automatic conversion of bazel target names to absolut windows paths by msys
             "MSYS_NO_PATHCONV": "true",
         },
         # inherit bash shell and visual studio path from host for windows
-        additional_env_inherit = ["BAZEL_SH", "BAZEL_VC", "BAZEL_LLVM", "PATH"],
+        additional_env_inherit = ["BAZEL_SH", "BAZEL_VC", "BAZEL_LLVM", "CLANG", "PATH"],
     )

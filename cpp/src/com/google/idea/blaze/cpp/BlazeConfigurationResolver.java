@@ -16,10 +16,13 @@
 package com.google.idea.blaze.cpp;
 
 import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.idea.blaze.base.ideinfo.ArtifactLocation;
+import com.google.idea.blaze.base.ideinfo.CIdeInfo;
 import com.google.idea.blaze.base.ideinfo.TargetIdeInfo;
 import com.google.idea.blaze.base.ideinfo.TargetKey;
+import com.google.idea.blaze.base.ideinfo.TargetMap;
 import com.google.idea.blaze.base.model.BlazeProjectData;
 import com.google.idea.blaze.base.model.primitives.WorkspacePath;
 import com.google.idea.blaze.base.model.primitives.WorkspaceRoot;
@@ -131,7 +134,7 @@ final class BlazeConfigurationResolver {
       return target.getcIdeInfo() != null
           && (projectViewFilter.isSourceTarget(target) ||
             allowExternalTargetSync && projectViewFilter.containsWorkspacePath(pathForExternalTarget))
-          && containsCompiledSources(target);
+          && containsSourceOrHeaderFiles(target);
     };
   }
 
@@ -155,20 +158,35 @@ final class BlazeConfigurationResolver {
     return null;
   }
 
-  private static boolean containsCompiledSources(TargetIdeInfo target) {
-    Predicate<ArtifactLocation> isCompiled = location -> {
-      String locationExtension = FileUtilRt.getExtension(location.relativePath());
-      return CFileExtensions.SOURCE_EXTENSIONS.contains(locationExtension);
-    };
+  private static boolean containsSourceOrHeaderFiles(TargetIdeInfo target) {
+    return containsSourceFiles(target) || containsSourceHeaders(target);
+  }
 
+  private static boolean containsSourceFiles(TargetIdeInfo target) {
+    return containsSourceFilesWithExtension(target, CFileExtensions.SOURCE_EXTENSIONS::contains);
+  }
+
+  private static boolean containsSourceHeaders(TargetIdeInfo target) {
+    return containsSourceFilesWithExtension(target, CFileExtensions.HEADER_EXTENSIONS::contains);
+  }
+
+  private static boolean containsSourceFilesWithExtension(
+      TargetIdeInfo target,
+      Predicate<String> extensionFilter
+  ) {
     if (target.getcIdeInfo() == null) {
       return false;
     }
 
+    Predicate<ArtifactLocation> hasMatchingExtension = location -> {
+      String locationExtension = FileUtilRt.getExtension(location.relativePath());
+      return extensionFilter.test(locationExtension);
+    };
+
     return target.getSources()
         .stream()
         .filter(ArtifactLocation::isSource)
-        .anyMatch(isCompiled);
+        .anyMatch(hasMatchingExtension);
   }
 
   private void buildBlazeConfigurationData(
@@ -182,7 +200,7 @@ final class BlazeConfigurationResolver {
 
       final var targetToData = new HashMap<TargetKey, BlazeResolveConfigurationData>();
       blazeProjectData.targetMap().targets().stream().filter(targetFilter).forEach(target -> {
-        final var data = createResolveConfiguration(target, compilerSettings);
+        final var data = createResolveConfiguration(target, blazeProjectData.targetMap(), compilerSettings);
         if (data != null) {
           targetToData.put(target.getKey(), data);
         }
@@ -227,6 +245,7 @@ final class BlazeConfigurationResolver {
   @Nullable
   private BlazeResolveConfigurationData createResolveConfiguration(
       TargetIdeInfo target,
+      TargetMap targetMap,
       ImmutableMap<TargetKey, BlazeCompilerSettings> compilerSettingsMap) {
     final var cIdeInfo = target.getcIdeInfo();
     if (cIdeInfo == null) {
@@ -236,6 +255,27 @@ final class BlazeConfigurationResolver {
     if (compilerSettings == null) {
       return null;
     }
+    if (containsSourceHeaders(target) && !containsSourceFiles(target)) {
+      return BlazeResolveConfigurationData.create(
+          target.getKey(),
+          cIdeInfo,
+          compilerSettings,
+          directDependencyCompilationContexts(target, targetMap));
+    }
     return BlazeResolveConfigurationData.create(target.getKey(), cIdeInfo, compilerSettings);
+  }
+
+  private static ImmutableList<CIdeInfo.CompilationContext> directDependencyCompilationContexts(
+      TargetIdeInfo target,
+      TargetMap targetMap
+  ) {
+    final var contexts = ImmutableList.<CIdeInfo.CompilationContext>builder();
+    for (final var dependency : target.getDependencies()) {
+      final var dependencyTarget = targetMap.get(dependency.getTargetKey());
+      if (dependencyTarget != null && dependencyTarget.getcIdeInfo() != null) {
+        contexts.add(dependencyTarget.getcIdeInfo().compilationContext());
+      }
+    }
+    return contexts.build();
   }
 }

@@ -18,6 +18,13 @@
       <autoImportHelper implementation="com.google.idea.blaze.cpp.oclang.BlazeCppAutoImportHelper"/>
       <customHeaderProvider implementation="com.google.idea.blaze.cpp.oclang.BlazeCustomHeaderProvider"/>
       <includeHelper implementation="com.google.idea.blaze.cpp.oclang.BlazeIncludeHelper"/>
+      <libraryFileConfigurationProvider implementation="com.google.idea.blaze.cpp.oclang.BlazeToolchainHeaderResolveConfigurationProvider" order="first"/>
+      <ocResolveRootAndConfigurationProvider implementation="com.google.idea.blaze.cpp.oclang.BlazeToolchainHeaderResolveConfigurationProvider" order="first"/>
+      <fileScopeProvider implementation="com.google.idea.blaze.cpp.oclang.BlazeToolchainHeaderResolveConfigurationProvider" order="first"/>
+  </extensions>
+
+  <extensions defaultExtensionNs="cidr">
+      <resolveConfigurationProvider implementation="com.google.idea.blaze.cpp.oclang.BlazeToolchainHeaderResolveConfigurationProvider" order="first"/>
   </extensions>
 
   <extensions defaultExtensionNs="com.google.idea.blaze">

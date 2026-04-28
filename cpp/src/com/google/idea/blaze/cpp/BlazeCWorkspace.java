@@ -47,11 +47,15 @@ import com.jetbrains.cidr.lang.CLanguageKind;
 import com.jetbrains.cidr.lang.OCLanguageKind;
 import com.jetbrains.cidr.lang.toolchains.CidrCompilerSwitches;
 import com.jetbrains.cidr.lang.toolchains.CidrToolEnvironment;
+import com.jetbrains.cidr.lang.workspace.CompilerSettingsData;
+import com.jetbrains.cidr.lang.workspace.ConfigurationData;
 import com.jetbrains.cidr.lang.workspace.OCResolveConfiguration;
+import com.jetbrains.cidr.lang.workspace.OCResolveConfigurationImpl;
 import com.jetbrains.cidr.lang.workspace.OCWorkspace;
 import com.jetbrains.cidr.lang.workspace.OCWorkspaceEventImpl;
 import com.jetbrains.cidr.lang.workspace.OCWorkspaceImpl;
 import com.jetbrains.cidr.lang.workspace.OCWorkspaceModificationTrackersImpl;
+import com.jetbrains.cidr.lang.workspace.SourceData;
 import com.jetbrains.cidr.lang.workspace.compiler.CachedTempFilesPool;
 import com.jetbrains.cidr.lang.workspace.compiler.CompilerInfoCache;
 import com.jetbrains.cidr.lang.workspace.compiler.CompilerInfoCache.Message;
@@ -59,14 +63,18 @@ import com.jetbrains.cidr.lang.workspace.compiler.CompilerInfoCache.Session;
 import com.jetbrains.cidr.lang.workspace.compiler.CompilerSpecificSwitchBuilder;
 import com.jetbrains.cidr.lang.workspace.compiler.OCCompilerKind;
 import com.jetbrains.cidr.lang.workspace.compiler.TempFilesPool;
+import com.jetbrains.cidr.lang.workspace.headerRoots.HeadersSearchPath;
 import java.io.File;
 import java.nio.file.Path;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -78,6 +86,22 @@ public final class BlazeCWorkspace {
   // This component is never actually serialized, and this should not ever need to change
   private static final int SERIALIZATION_VERSION = 1;
   private static final Logger LOG = Logger.getInstance(BlazeCWorkspace.class);
+  private static final ImmutableList<String> CPP_STDLIB_INCLUDE_FRAGMENTS =
+      ImmutableList.of(
+          "external/+cc_toolchains_extension+clang_toolchains-llvm_libcxx/include",
+          "external/+cc_toolchains_extension+clang_toolchains-llvm_libcxxabi/include",
+          "libcxx/include",
+          "libcxxabi/include",
+          "libc++/include",
+          "libc++abi/include");
+  private static final Pattern CPP_STDLIB_INCLUDE_PATH_PATTERN =
+      Pattern.compile(".*/c\\+\\+/[^/]+/?$");
+  private static final Pattern CLANG_RESOURCE_INCLUDE_PATH_PATTERN =
+      Pattern.compile(".*/lib/clang/[^/]+/include/?$");
+  private static final Pattern LINUX_MULTIARCH_INCLUDE_PATH_PATTERN =
+      Pattern.compile(".*/usr/include/[^/]+-linux-gnu/?$");
+  private static final Pattern GCC_RESOURCE_INCLUDE_PATH_PATTERN =
+      Pattern.compile(".*/usr/lib/gcc/[^/]+/[^/]+/include/?$");
 
   private final BlazeConfigurationResolver configurationResolver;
   private BlazeConfigurationResolverResult resolverResult;
@@ -162,7 +186,7 @@ public final class BlazeCWorkspace {
     return infoMap.build();
   }
 
-  private static CidrCompilerSwitches buildSwitchBuilder(
+  static CidrCompilerSwitches buildSwitchBuilder(
       BlazeCompilerSettings compilerSettings,
       CompilerSpecificSwitchBuilder builder,
       ExecutionRootPathResolver resolver,
@@ -170,14 +194,18 @@ public final class BlazeCWorkspace {
       ImmutableList<String> additionalSwitches
   ) {
     final var combinedBuilder = compilerSettings.createSwitchBuilder();
-    combinedBuilder.withSwitches(builder.build());
 
+    if (language == CLanguageKind.CPP) {
+      addPrioritizedCppStdlibIncludePaths(
+          compilerSettings.getCompilerSwitches(language), combinedBuilder, resolver);
+    }
     CoptsProcessor.apply(
         /* options = */ compilerSettings.getCompilerSwitches(language),
         /* kind = */ compilerSettings.getCompilerKind(),
         /* sink = */ combinedBuilder,
         /* resolver = */ resolver
     );
+    combinedBuilder.withSwitches(builder.build());
     CoptsProcessor.apply(
         /* options = */ additionalSwitches,
         /* kind = */ compilerSettings.getCompilerKind(),
@@ -186,6 +214,142 @@ public final class BlazeCWorkspace {
     );
 
     return combinedBuilder.build();
+  }
+
+  private static void addPrioritizedCppStdlibIncludePaths(
+      ImmutableList<String> options,
+      CompilerSpecificSwitchBuilder builder,
+      ExecutionRootPathResolver resolver) {
+    LinkedHashSet<String> paths = new LinkedHashSet<>();
+    boolean consumeIncludeValue = false;
+
+    for (String option : options) {
+      if (consumeIncludeValue) {
+        addResolvedCppStdlibIncludePath(paths, option, resolver);
+        consumeIncludeValue = false;
+        continue;
+      }
+
+      if (option.equals("-I") || option.equals("-isystem")) {
+        consumeIncludeValue = true;
+        continue;
+      }
+      if (option.startsWith("-I") && option.length() > 2) {
+        addResolvedCppStdlibIncludePath(paths, option.substring(2), resolver);
+        continue;
+      }
+      if (option.startsWith("-isystem") && option.length() > "-isystem".length()) {
+        addResolvedCppStdlibIncludePath(paths, option.substring("-isystem".length()), resolver);
+      }
+    }
+
+    paths.forEach(builder::withIncludePath);
+  }
+
+  private static void addResolvedCppStdlibIncludePath(
+      LinkedHashSet<String> paths, String rawPath, ExecutionRootPathResolver resolver) {
+    String path = rawPath.trim();
+    if (path.startsWith("=")) {
+      path = path.substring(1).trim();
+    }
+    if (!isCppStdlibIncludePath(path)) {
+      return;
+    }
+
+    Path nioPath = Path.of(path);
+    if (nioPath.isAbsolute()) {
+      paths.add(nioPath.toString());
+      return;
+    }
+
+    resolver.resolveToIncludeDirectories(ExecutionRootPath.create(nioPath)).stream()
+        .map(File::getAbsolutePath)
+        .forEach(paths::add);
+  }
+
+  static ImmutableList<HeadersSearchPath> prioritizeCppStdlibHeaderSearchPaths(
+      List<HeadersSearchPath> paths) {
+    return prioritizeToolchainHeaderSearchPaths(paths);
+  }
+
+  static ImmutableList<HeadersSearchPath> prioritizeToolchainHeaderSearchPaths(
+      List<HeadersSearchPath> paths) {
+    LinkedHashSet<String> prioritizedPaths = new LinkedHashSet<>();
+    LinkedHashSet<String> prioritizedCPaths = new LinkedHashSet<>();
+    for (HeadersSearchPath path : paths) {
+      if (isCppStdlibHeaderSearchPath(path)) {
+        prioritizedPaths.add(path.getPath());
+      } else if (isToolchainCHeaderSearchPath(path)) {
+        prioritizedCPaths.add(path.getPath());
+      }
+    }
+    if (prioritizedPaths.isEmpty() && prioritizedCPaths.isEmpty()) {
+      return ImmutableList.copyOf(paths);
+    }
+
+    ImmutableList.Builder<HeadersSearchPath> result = ImmutableList.builder();
+    prioritizedPaths.stream()
+        .map(HeadersSearchPath::includes)
+        .forEach(result::add);
+    paths.stream()
+        .filter(path -> !isCppStdlibHeaderSearchPath(path))
+        .filter(path -> !isToolchainCHeaderSearchPath(path))
+        .filter(path -> path.getKind() != HeadersSearchPath.Kind.USER)
+        .filter(path -> !path.isBuiltInHeaders())
+        .forEach(result::add);
+    prioritizedCPaths.stream()
+        .map(HeadersSearchPath::includes)
+        .forEach(result::add);
+    paths.stream()
+        .filter(path -> !isCppStdlibHeaderSearchPath(path))
+        .filter(path -> !isToolchainCHeaderSearchPath(path))
+        .filter(path -> path.getKind() == HeadersSearchPath.Kind.USER)
+        .forEach(result::add);
+    paths.stream()
+        .filter(path -> !isCppStdlibHeaderSearchPath(path))
+        .filter(path -> !isToolchainCHeaderSearchPath(path))
+        .filter(path -> path.getKind() != HeadersSearchPath.Kind.USER)
+        .filter(HeadersSearchPath::isBuiltInHeaders)
+        .forEach(result::add);
+    return result.build();
+  }
+
+  private static boolean isCppStdlibHeaderSearchPath(HeadersSearchPath path) {
+    return !path.isRecursive()
+        && !path.isFrameworksSearchPath()
+        && isCppStdlibIncludePath(path.getPath());
+  }
+
+  private static boolean isToolchainCHeaderSearchPath(HeadersSearchPath path) {
+    return !path.isRecursive()
+        && !path.isFrameworksSearchPath()
+        && path.isBuiltInHeaders()
+        && isToolchainCIncludePath(path.getPath());
+  }
+
+  static boolean isCppStdlibIncludePath(String path) {
+    String normalized = path.replace('\\', '/');
+    return CPP_STDLIB_INCLUDE_FRAGMENTS.stream()
+        .anyMatch(fragment -> normalized.equals(fragment)
+            || normalized.equals(fragment + "/")
+            || normalized.endsWith("/" + fragment)
+            || normalized.endsWith("/" + fragment + "/")
+            || normalized.contains("/" + fragment + "/"))
+        || normalized.endsWith("/include/c++/v1")
+        || normalized.endsWith("/include/c++/v1/")
+        || CPP_STDLIB_INCLUDE_PATH_PATTERN.matcher(normalized).matches();
+  }
+
+  private static boolean isToolchainCIncludePath(String path) {
+    String normalized = path.replace('\\', '/');
+    return normalized.contains("/external/+cc_toolchains_extension+clang_toolchains-sysroot-")
+        || CLANG_RESOURCE_INCLUDE_PATH_PATTERN.matcher(normalized).matches()
+        || LINUX_MULTIARCH_INCLUDE_PATH_PATTERN.matcher(normalized).matches()
+        || GCC_RESOURCE_INCLUDE_PATH_PATTERN.matcher(normalized).matches()
+        || normalized.endsWith("/usr/include")
+        || normalized.endsWith("/usr/include/")
+        || normalized.endsWith("/usr/local/include")
+        || normalized.endsWith("/usr/local/include/");
   }
 
   private static void logResolveConfiguration(BlazeResolveConfiguration config) {
@@ -300,18 +464,24 @@ public final class BlazeCWorkspace {
           configSourceFiles.put(vf, perFileCompilerOpts);
 
           if (!configLanguages.containsKey(kind)) {
-            // If a file isn't found in configSourceFiles (newly created files), CLion uses the
-            // configLanguages switches. We want some basic header search roots (genfiles),
-            // which are part of every target's iquote directories. See:
-            // https://github.com/bazelbuild/bazel/blob/2c493e8a2132d54f4b2fb8046f6bcef11e92cd22/src/main/java/com/google/devtools/build/lib/rules/cpp/CcCompilationHelper.java#L911
-            addConfigLanguageSwitches(configLanguages, compilerSettings, quoteIncludePaths, kind);
+            // If CLion uses language-level settings for a header, preserve the target-level
+            // include roots instead of falling back to only workspace/genfiles quote roots.
+            addConfigLanguageSwitches(
+                configLanguages,
+                compilerSettings,
+                kind == CLanguageKind.C ? cCompilerSwitches : cppCompilerSwitches,
+                kind);
           }
         }
       }
 
       for (OCLanguageKind language : supportedLanguages) {
         if (!configLanguages.containsKey(language)) {
-          addConfigLanguageSwitches(configLanguages, compilerSettings, ImmutableList.of(), language);
+          addConfigLanguageSwitches(
+              configLanguages,
+              compilerSettings,
+              language == CLanguageKind.C ? cCompilerSwitches : cppCompilerSwitches,
+              language);
         }
       }
 
@@ -404,17 +574,13 @@ public final class BlazeCWorkspace {
   private void addConfigLanguageSwitches(
       Map<OCLanguageKind, PerLanguageCompilerOpts> configLanguages,
       BlazeCompilerSettings compilerSettings,
-      List<String> quoteIncludePaths,
+      CidrCompilerSwitches switches,
       OCLanguageKind language) {
     OCCompilerKind compilerKind = compilerSettings.getCompilerKind();
     File executable = compilerSettings.getCompilerExecutable(language);
 
-    final var switchBuilder = compilerSettings.createSwitchBuilder();
-    switchBuilder.withSwitches(compilerSettings.getCompilerSwitches(language));
-    quoteIncludePaths.forEach(switchBuilder::withQuoteIncludePath);
-
     PerLanguageCompilerOpts perLanguageCompilerOpts =
-        new PerLanguageCompilerOpts(compilerKind, executable, switchBuilder.build());
+        new PerLanguageCompilerOpts(compilerKind, executable, switches);
     configLanguages.put(language, perLanguageCompilerOpts);
   }
 
@@ -480,6 +646,7 @@ public final class BlazeCWorkspace {
       }
       MultiMap<Integer, Message> messages = new MultiMap<>();
       session.waitForAll(messages);
+      normalizeCppStdlibHeaderSearchPaths(workspaceModel);
 
       final var frozenMessages =
         messages.freezeValues().values().stream()
@@ -501,5 +668,38 @@ public final class BlazeCWorkspace {
       throw e;
     }
     tempFilesPool.clean();
+  }
+
+  private void normalizeCppStdlibHeaderSearchPaths(WorkspaceModel workspaceModel) {
+    for (OCResolveConfiguration.ModifiableModel config : workspaceModel.model.getConfigurations()) {
+      if (config instanceof OCResolveConfigurationImpl.ModifiableModelImpl model) {
+        normalizeCppStdlibHeaderSearchPaths(model.getMutableData$intellij_cidr_projectModel());
+      }
+    }
+  }
+
+  private void normalizeCppStdlibHeaderSearchPaths(ConfigurationData configurationData) {
+    normalizeCppStdlibHeaderSearchPaths(
+        configurationData.getLanguagesData().get(CLanguageKind.CPP));
+    configurationData.getSourcesData().values().stream()
+        .filter(sourceData -> sourceData.getLanguageKind() == CLanguageKind.CPP)
+        .map(SourceData::getCompilerSettings)
+        .filter(Objects::nonNull)
+        .forEach(this::normalizeCppStdlibHeaderSearchPaths);
+  }
+
+  private void normalizeCppStdlibHeaderSearchPaths(
+      CompilerSettingsData compilerSettingsData) {
+    if (compilerSettingsData == null || compilerSettingsData.getHeaderSearchPaths() == null) {
+      return;
+    }
+
+    ImmutableList<HeadersSearchPath> normalized =
+        prioritizeToolchainHeaderSearchPaths(
+            compilerSettingsData.getHeaderSearchPaths());
+    if (!normalized.equals(compilerSettingsData.getHeaderSearchPaths())) {
+      compilerSettingsData.setHeaderSearchPaths(normalized);
+      compilerSettingsData.clearCalculated();
+    }
   }
 }

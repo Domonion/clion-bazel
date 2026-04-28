@@ -75,6 +75,8 @@ import javax.annotation.Nullable;
 public final class BlazeConfigurationToolchainResolver {
   private static final Logger logger =
       Logger.getInstance(BlazeConfigurationToolchainResolver.class);
+  private static final ImmutableList<String> BAZEL_MANAGED_CLANG_PATHS =
+      ImmutableList.of("+cc_toolchains_extension+clang_toolchains-clang-linux-x86_64/bin/clang");
 
   private BlazeConfigurationToolchainResolver() {}
 
@@ -219,16 +221,29 @@ public final class BlazeConfigurationToolchainResolver {
     });
   }
 
-  private static @Nullable File resolveCompilerExecutable(
+  @VisibleForTesting
+  static @Nullable File resolveCompilerExecutable(
       BlazeContext context,
       ExecutionRootPathResolver executionRootPathResolver,
       ExecutionRootPath compilerPath
   ) {
     File compilerFile = executionRootPathResolver.resolveExecutionRootPath(compilerPath);
+    File executionRoot = executionRootPathResolver.getExecutionRoot();
 
     if (compilerFile == null) {
+      File bazelManagedClang = findBazelManagedClang(executionRoot, compilerPath);
+      if (bazelManagedClang != null) {
+        return bazelManagedClang;
+      }
       IssueOutput.error("Unable to find compiler executable: " + compilerPath).submit(context);
       return null;
+    }
+
+    if (!compilerFile.exists()) {
+      File bazelManagedClang = findBazelManagedClang(executionRoot, compilerPath);
+      if (bazelManagedClang != null) {
+        return bazelManagedClang;
+      }
     }
 
     if (!compilerFile.exists() && SystemInfo.isWindows) {
@@ -237,6 +252,53 @@ public final class BlazeConfigurationToolchainResolver {
     }
 
     return compilerFile;
+  }
+
+  @VisibleForTesting
+  static @Nullable File findBazelManagedClang(File executionRoot, ExecutionRootPath compilerPath) {
+    if (!looksLikeClangCompiler(compilerPath)) {
+      return null;
+    }
+
+    for (File externalRoot : bazelExternalRoots(executionRoot)) {
+      for (String path : BAZEL_MANAGED_CLANG_PATHS) {
+        File candidate = new File(externalRoot, path);
+        if (candidate.canExecute()) {
+          return candidate;
+        }
+      }
+    }
+    return null;
+  }
+
+  private static boolean looksLikeClangCompiler(ExecutionRootPath compilerPath) {
+    final var path = compilerPath.path();
+    final var fileName = path.getFileName();
+    if (fileName != null) {
+      String name = fileName.toString();
+      if (name.equals("clang") || name.equals("clang++")) {
+        return true;
+      }
+    }
+    return path.toString().contains("clang_toolchains-clang");
+  }
+
+  private static ImmutableList<File> bazelExternalRoots(File executionRoot) {
+    final var roots = ImmutableList.<File>builder();
+    final var outputBase = outputBaseForExecutionRoot(executionRoot);
+    if (outputBase != null) {
+      roots.add(new File(outputBase, "external"));
+    }
+    roots.add(new File(executionRoot, "external"));
+    return roots.build();
+  }
+
+  private static @Nullable File outputBaseForExecutionRoot(File executionRoot) {
+    final var execrootDir = executionRoot.getParentFile();
+    if (execrootDir == null || !"execroot".equals(execrootDir.getName())) {
+      return null;
+    }
+    return execrootDir.getParentFile();
   }
 
   private static @Nullable String mergeCompilerVersions(
