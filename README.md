@@ -1,3 +1,12 @@
+IMPORTANT
+In Clion:
+1. 2 x shift
+2. Action
+3. Edit custom properies
+4. `bazel.cpp.header.cache.enabled=true`
+
+otherwise will not work
+
 # A CLion plugin for [Bazel](http://bazel.build) projects
 
 As of July 1, 2025, the Bazel for IntelliJ and Bazel for CLion plugins are maintained by JetBrains. These plugins are not offered by nor affiliated with Google. The Bazel trademark and logo are the property of Google LLC.
