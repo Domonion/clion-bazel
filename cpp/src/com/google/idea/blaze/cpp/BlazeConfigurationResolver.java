@@ -37,6 +37,7 @@ import com.google.idea.blaze.base.sync.workspace.ExecutionRootPathResolver;
 import com.google.idea.blaze.base.sync.workspace.WorkspaceHelper;
 import com.google.idea.blaze.base.sync.workspace.WorkspacePathResolver;
 import com.google.idea.blaze.common.PrintOutput;
+import com.google.idea.blaze.cpp.sync.HeaderCacheService;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.io.FileUtilRt;
@@ -44,10 +45,9 @@ import com.intellij.openapi.util.registry.Registry;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.HashMap;
-
-import javax.annotation.Nullable;
 import java.util.Map;
 import java.util.function.Predicate;
+import javax.annotation.Nullable;
 
 final class BlazeConfigurationResolver {
   static final String SYNC_EXTERNAL_TARGETS_FROM_DIRECTORIES_KEY = "bazel.cpp.sync.external.targets.from.directories";
@@ -126,15 +126,24 @@ final class BlazeConfigurationResolver {
       Project project,
       WorkspacePathResolver workspacePathResolver) {
     return target -> {
-      WorkspacePath pathForExternalTarget = getWorkspacePathForExternalTarget(target, project, workspacePathResolver);
-
+      boolean allowExternalCachedSourceTarget =
+          HeaderCacheService.getEnabled()
+              && target.getKey().label().isExternal()
+              && containsSourceFiles(target, /* includeGeneratedArtifacts= */ true);
+      WorkspacePath pathForExternalTarget =
+          allowExternalCachedSourceTarget
+              ? null
+              : getWorkspacePathForExternalTarget(target, project, workspacePathResolver);
       boolean allowExternalTargetSync =
-          Registry.is(SYNC_EXTERNAL_TARGETS_FROM_DIRECTORIES_KEY) && pathForExternalTarget != null;
+          !allowExternalCachedSourceTarget
+              && Registry.is(SYNC_EXTERNAL_TARGETS_FROM_DIRECTORIES_KEY)
+              && pathForExternalTarget != null;
 
       return target.getcIdeInfo() != null
-          && (projectViewFilter.isSourceTarget(target) ||
-            allowExternalTargetSync && projectViewFilter.containsWorkspacePath(pathForExternalTarget))
-          && containsSourceOrHeaderFiles(target);
+          && (projectViewFilter.isSourceTarget(target)
+              || allowExternalCachedSourceTarget
+              || allowExternalTargetSync && projectViewFilter.containsWorkspacePath(pathForExternalTarget))
+          && containsSourceOrHeaderFiles(target, HeaderCacheService.getEnabled());
     };
   }
 
@@ -158,21 +167,30 @@ final class BlazeConfigurationResolver {
     return null;
   }
 
-  private static boolean containsSourceOrHeaderFiles(TargetIdeInfo target) {
-    return containsSourceFiles(target) || containsSourceHeaders(target);
+  private static boolean containsSourceOrHeaderFiles(
+      TargetIdeInfo target,
+      boolean includeGeneratedSourceFiles) {
+    return containsSourceFiles(target, includeGeneratedSourceFiles) || containsSourceHeaders(target);
   }
 
-  private static boolean containsSourceFiles(TargetIdeInfo target) {
-    return containsSourceFilesWithExtension(target, CFileExtensions.SOURCE_EXTENSIONS::contains);
+  private static boolean containsSourceFiles(TargetIdeInfo target, boolean includeGeneratedArtifacts) {
+    return containsSourceFilesWithExtension(
+        target,
+        CFileExtensions.SOURCE_EXTENSIONS::contains,
+        includeGeneratedArtifacts);
   }
 
   private static boolean containsSourceHeaders(TargetIdeInfo target) {
-    return containsSourceFilesWithExtension(target, CFileExtensions.HEADER_EXTENSIONS::contains);
+    return containsSourceFilesWithExtension(
+        target,
+        CFileExtensions.HEADER_EXTENSIONS::contains,
+        /* includeGeneratedArtifacts= */ false);
   }
 
   private static boolean containsSourceFilesWithExtension(
       TargetIdeInfo target,
-      Predicate<String> extensionFilter
+      Predicate<String> extensionFilter,
+      boolean includeGeneratedArtifacts
   ) {
     if (target.getcIdeInfo() == null) {
       return false;
@@ -185,7 +203,7 @@ final class BlazeConfigurationResolver {
 
     return target.getSources()
         .stream()
-        .filter(ArtifactLocation::isSource)
+        .filter(location -> includeGeneratedArtifacts || location.isSource())
         .anyMatch(hasMatchingExtension);
   }
 
@@ -206,12 +224,13 @@ final class BlazeConfigurationResolver {
         }
       });
 
-      findEquivalenceClasses(context, blazeProjectData, targetToData, builder);
+      findEquivalenceClasses(context, project, blazeProjectData, targetToData, builder);
     });
   }
 
   private static void findEquivalenceClasses(
       BlazeContext context,
+      Project project,
       BlazeProjectData blazeProjectData,
       Map<TargetKey, BlazeResolveConfigurationData> targetToData,
       BlazeConfigurationResolverResult.Builder builder
@@ -229,7 +248,7 @@ final class BlazeConfigurationResolver {
       final var targets = entry.getValue();
       dataToConfiguration.put(
           data,
-          BlazeResolveConfiguration.create(blazeProjectData, data, targets)
+          BlazeResolveConfiguration.create(project, blazeProjectData, data, targets)
       );
     }
 
@@ -255,7 +274,7 @@ final class BlazeConfigurationResolver {
     if (compilerSettings == null) {
       return null;
     }
-    if (containsSourceHeaders(target) && !containsSourceFiles(target)) {
+    if (containsSourceHeaders(target) && !containsSourceFiles(target, HeaderCacheService.getEnabled())) {
       return BlazeResolveConfigurationData.create(
           target.getKey(),
           cIdeInfo,

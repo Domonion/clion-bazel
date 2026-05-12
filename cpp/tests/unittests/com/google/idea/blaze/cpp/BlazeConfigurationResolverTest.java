@@ -67,6 +67,7 @@ import com.google.idea.blaze.base.sync.workspace.ExecutionRootPathResolver;
 import com.google.idea.blaze.base.sync.workspace.WorkspaceHelper;
 import com.google.idea.common.experiments.ExperimentService;
 import com.google.idea.common.experiments.MockExperimentService;
+import com.google.idea.blaze.cpp.sync.HeaderCacheService;
 import com.intellij.openapi.extensions.impl.ExtensionPointImpl;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.impl.ProgressManagerImpl;
@@ -133,6 +134,7 @@ public class BlazeConfigurationResolverTest extends BlazeTestCase {
 
     projectServices.register(
         BlazeImportSettingsManager.class, new BlazeImportSettingsManager(project));
+    projectServices.register(HeaderCacheService.class, new HeaderCacheService(project));
     BlazeImportSettingsManager.getInstance(getProject())
         .setImportSettings(
             new BlazeImportSettings(
@@ -938,6 +940,44 @@ public class BlazeConfigurationResolverTest extends BlazeTestCase {
   }
 
   @Test
+  public void testExternalDependencySourceResolvedWhenHeaderCacheEnabled() {
+    Registry.get(HeaderCacheService.ENABLED_KEY).setValue(true);
+
+    ProjectView projectView = projectView(
+        directories("test"),
+        targets("//test:target"));
+
+    TargetMap targetMap =
+        TargetMapBuilder.builder()
+            .addTarget(createCcToolchain())
+            .addTarget(
+                createCcTarget(
+                    "//test:target",
+                    CppBlazeRules.RuleTypes.CC_BINARY.getKind(),
+                    ImmutableList.of(src("test/test.cc")),
+                    "//:toolchain")
+                    .addDependency("@external_dependency//foo:bar"))
+            .addTarget(
+                createCcTarget(
+                    "@external_dependency//foo:bar",
+                    CppBlazeRules.RuleTypes.CC_LIBRARY.getKind(),
+                    ImmutableList.of(externalSrc("external/external_dependency", "foo/bar.cpp")),
+                    "//:toolchain"))
+            .build();
+
+    try {
+      assertThatResolving(projectView, targetMap).producesConfigurationsFor(
+          "//test:target and 1 other target(s)");
+      assertThat(resolverResult.getAllConfigurations().get(0).getTargets().stream()
+          .map(targetKey -> targetKey.label().toString())
+          .collect(Collectors.toList())).containsAtLeast("//test:target",
+          "@external_dependency//foo:bar");
+    } finally {
+      Registry.get(HeaderCacheService.ENABLED_KEY).setValue(false);
+    }
+  }
+
+  @Test
   public void xcodeSettingsAreChecked() {
     ProjectView projectView = projectView(directories("foo/bar"), targets("//foo/bar:binary"));
     TargetMap targetMap =
@@ -1000,6 +1040,15 @@ public class BlazeConfigurationResolverTest extends BlazeTestCase {
 
   private static ArtifactLocation gen(String path) {
     return ArtifactLocation.builder().setRelativePath(path).setIsSource(false).build();
+  }
+
+  private static ArtifactLocation externalSrc(String rootPath, String path) {
+    return ArtifactLocation.builder()
+        .setRootPath(rootPath)
+        .setRelativePath(path)
+        .setIsSource(true)
+        .setIsExternal(true)
+        .build();
   }
 
   private static TargetIdeInfo.Builder createCcTarget(

@@ -41,6 +41,7 @@ import com.intellij.openapi.util.io.NioFiles
 import com.intellij.openapi.util.registry.Registry
 import com.intellij.util.concurrency.annotations.RequiresBackgroundThread
 import com.intellij.util.concurrency.annotations.RequiresReadLockAbsence
+import com.jetbrains.cidr.lang.OCFileTypeHelpers
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -62,7 +63,12 @@ class HeaderCacheService(private val project: Project) {
     fun of(project: Project): HeaderCacheService = project.service()
 
     @JvmStatic
-    val enabled: Boolean get() = Registry.`is`(ENABLED_KEY)
+    val enabled: Boolean
+      get() = try {
+        Registry.`is`(ENABLED_KEY)
+      } catch (_: MissingResourceException) {
+        false
+      }
   }
 
   val cacheDirectory: Path by lazy {
@@ -76,7 +82,7 @@ class HeaderCacheService(private val project: Project) {
     }
   }
 
-  // tracks headers which are actually stored in the cache
+  // tracks files which are actually stored in the cache
   private val cacheTracker: MutableSet<String> = mutableSetOf()
 
   private fun cacheDirectory(configurationId: String): Path {
@@ -122,46 +128,60 @@ class HeaderCacheService(private val project: Project) {
     val info = target.getcIdeInfo() ?: return
 
     val targetCacheDirectory = cacheDirectory(key)
-    val decoder = projectData.artifactLocationDecoder()
 
     for (header in info.compilationContext().headers()) {
-      // check if the header is inside bazel-bin
-      if (!isInBazelBin(header)) continue
+      cacheArtifact(projectData, key, targetCacheDirectory, header, "header")
+    }
 
-      // check if the header is already present in the cache
-      if (!cacheTracker.add(key.configuration() + "/" + header.relativePath())) continue
+    for (source in target.sources) {
+      if (!isSourceOrHeaderFile(source)) continue
+      cacheArtifact(projectData, key, targetCacheDirectory, source, "source")
+    }
+  }
 
-      val path = resolveCachePath(targetCacheDirectory, header)
+  private fun cacheArtifact(
+    projectData: BlazeProjectData,
+    key: TargetKey,
+    targetCacheDirectory: Path,
+    location: ArtifactLocation,
+    kind: String,
+  ) {
+    if (!isCacheable(location)) return
 
-      try {
-        Files.createDirectories(path.parent)
+    // check if the file is already present in the cache
+    val cacheKey = cacheKey(key, location)
+    if (!cacheTracker.add(cacheKey)) return
 
-        // delete existing entry to handle type changes (symlink <-> regular file) on incremental sync
-        Files.deleteIfExists(path)
+    val path = resolveCachePath(targetCacheDirectory, key, location)
 
-        val artifact = decoder.resolveOutput(header)
+    try {
+      Files.createDirectories(path.parent)
 
-        // for local files, check if the file is a symlink (e.g. _virtual_includes)
-        if (artifact is LocalFileArtifact) {
-          val localPath = artifact.file.toPath()
-          if (Files.isSymbolicLink(localPath)) {
-            // fall through to content-copy if symlink creation failed (e.g. Windows without Developer Mode)
-            if (tryCreateSymlink(path, localPath.toRealPath())) continue
-          }
+      // delete existing entry to handle type changes (symlink <-> regular file) on incremental sync
+      Files.deleteIfExists(path)
+
+      val artifact = projectData.artifactLocationDecoder().resolveOutput(location)
+
+      // for local files, check if the file is a symlink (e.g. _virtual_includes)
+      if (artifact is LocalFileArtifact) {
+        val localPath = artifact.file.toPath()
+        if (Files.isSymbolicLink(localPath) || isExternalSourceArtifact(location)) {
+          // fall through to content-copy if symlink creation failed (e.g. Windows without Developer Mode)
+          if (tryCreateSymlink(path, localPath.toRealPath())) return
         }
-
-        // content copy for regular (generated) files, remote files, or as a fallback when symlink creation fails
-        artifact.inputStream.use { src ->
-          Files.newOutputStream(
-            path, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,
-          ).use { dst ->
-            src.transferTo(dst)
-          }
-        }
-      } catch (e: IOException) {
-        cacheTracker.remove(header.relativePath())
-        LOG.warn("failed to cache header ${header.relativePath()} for ${key.label()} (${key.configuration()})", e)
       }
+
+      // content copy for regular (generated) files, remote files, or as a fallback when symlink creation fails
+      artifact.inputStream.use { src ->
+        Files.newOutputStream(
+          path, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,
+        ).use { dst ->
+          src.transferTo(dst)
+        }
+      }
+    } catch (e: IOException) {
+      cacheTracker.remove(cacheKey)
+      LOG.warn("failed to cache $kind ${location.relativePath()} for ${key.label()} (${key.configuration()})", e)
     }
   }
 
@@ -199,6 +219,24 @@ class HeaderCacheService(private val project: Project) {
     )
   }
 
+  @Synchronized
+  fun resolve(configurationId: String, location: ArtifactLocation): Optional<Path> {
+    if (!isInBazelBin(location)) return Optional.empty()
+
+    return Optional.of(resolveCachePath(cacheDirectory(configurationId), null, location))
+  }
+
+  @Synchronized
+  fun resolve(target: TargetKey, location: ArtifactLocation): Optional<Path> {
+    if (!isCacheable(location)) return Optional.empty()
+
+    return Optional.of(resolveCachePath(cacheDirectory(target), target, location))
+  }
+
+  private fun cacheKey(key: TargetKey, location: ArtifactLocation): String {
+    return key.configuration() + "/" + location.getExecutionRootRelativePath()
+  }
+
   private fun isInBazelBin(path: Path): Boolean {
     return path.nameCount >= 3
         && path.getName(0).toString() == "bazel-out"
@@ -209,18 +247,46 @@ class HeaderCacheService(private val project: Project) {
     return location.rootPath().isNotBlank() && isInBazelBin(Path.of(location.rootPath()))
   }
 
-  private fun resolveCachePath(cacheDirectory: Path, location: ArtifactLocation): Path {
+  private fun isCacheable(location: ArtifactLocation): Boolean {
+    return isInBazelBin(location) || isExternalSourceArtifact(location)
+  }
+
+  private fun isExternalSourceArtifact(location: ArtifactLocation): Boolean {
+    return location.isExternal && location.isSource
+  }
+
+  private fun isSourceOrHeaderFile(location: ArtifactLocation): Boolean {
+    val fileName = Path.of(location.relativePath()).fileName.toString()
+    return OCFileTypeHelpers.isSourceFile(fileName) || OCFileTypeHelpers.isHeaderFile(fileName)
+  }
+
+  private fun resolveCachePath(cacheDirectory: Path, key: TargetKey?, location: ArtifactLocation): Path {
     val root = Path.of(location.rootPath())
 
-    // for external root paths (e.g bazel-out/k8-fastbuild/bin/external/bazel_tools) the external prefix
+    // for external root paths (e.g. bazel-out/k8-fastbuild/bin/external/bazel_tools) the external prefix
     // (e.g. external/bazel_tools) needs to map into the cache as well
-    val cacheRoot = if (root.nameCount > 3) {
+    val cacheRoot = if (isInBazelBin(root) && root.nameCount > 3) {
       cacheDirectory.resolve(root.subpath(3, root.nameCount))
+    } else if (location.isExternal) {
+      cacheDirectory.resolve("external").resolve(externalWorkspaceName(key, root))
     } else {
       cacheDirectory
     }
 
     return cacheRoot.resolve(location.relativePath())
+  }
+
+  private fun externalWorkspaceName(key: TargetKey?, root: Path): String {
+    val workspaceName = key?.label()?.externalWorkspaceName()
+    if (!workspaceName.isNullOrBlank()) return workspaceName
+
+    val externalIndex = (0 until root.nameCount)
+      .firstOrNull { root.getName(it).toString() == "external" }
+    if (externalIndex != null && externalIndex + 1 < root.nameCount) {
+      return root.getName(externalIndex + 1).toString()
+    }
+
+    return root.fileName?.toString() ?: "unknown"
   }
 }
 
@@ -269,7 +335,7 @@ private class HeaderCacheLoggedDirectory : LoggedDirectoryProvider {
       LoggedDirectoryProvider.LoggedDirectory.builder()
         .setPath(HeaderCacheService.of(project).cacheDirectory)
         .setOriginatingIdePart("CLwB Header Cache")
-        .setPurpose("Cache headers from the execution root")
+        .setPurpose("Cache headers and C++ sources from the execution root")
         .build()
     )
   }

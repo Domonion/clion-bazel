@@ -20,6 +20,7 @@ import com.google.common.collect.ImmutableMap
 import com.google.idea.blaze.base.ideinfo.TargetKey
 import com.google.idea.blaze.base.io.VirtualFileSystemProvider
 import com.google.idea.blaze.base.model.BlazeProjectData
+import com.google.idea.blaze.cpp.sync.HeaderCacheService
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
@@ -41,6 +42,7 @@ data class BlazeResolveConfiguration(
 
     @JvmStatic
     fun create(
+      project: Project,
       blazeProjectData: BlazeProjectData,
       configurationData: BlazeResolveConfigurationData,
       targets: Collection<TargetKey>
@@ -48,7 +50,7 @@ data class BlazeResolveConfiguration(
       configurationData,
       computeDisplayName(targets),
       ImmutableList.copyOf(targets),
-      computeTargetToSources(blazeProjectData, targets)
+      computeTargetToSources(project, blazeProjectData, targets)
     )
   }
 
@@ -101,19 +103,21 @@ private fun computeDisplayName(targets: Collection<TargetKey>): String {
 }
 
 private fun computeTargetToSources(
+  project: Project,
   blazeProjectData: BlazeProjectData,
   targets: Collection<TargetKey>,
 ): ImmutableMap<TargetKey, ImmutableList<VirtualFile>> {
   val builder = ImmutableMap.builder<TargetKey, ImmutableList<VirtualFile>>()
 
   for (targetKey in targets) {
-    builder.put(targetKey, computeSources(blazeProjectData, targetKey))
+    builder.put(targetKey, computeSources(project, blazeProjectData, targetKey))
   }
 
   return builder.build()
 }
 
 private fun computeSources(
+  project: Project,
   blazeProjectData: BlazeProjectData,
   targetKey: TargetKey,
 ): ImmutableList<VirtualFile> {
@@ -125,7 +129,14 @@ private fun computeSources(
   }
 
   for (source in ideInfo.sources) {
-    val path = blazeProjectData.artifactLocationDecoder().decode(source).toPath()
+    val path =
+      if (HeaderCacheService.enabled) {
+        HeaderCacheService.of(project)
+          .resolve(targetKey, source)
+          .orElseGet { blazeProjectData.artifactLocationDecoder().decode(source).toPath() }
+      } else {
+        blazeProjectData.artifactLocationDecoder().decode(source).toPath()
+      }
 
     val fileSystem = VirtualFileSystemProvider.getInstance().system
     val virtualFile = fileSystem.findFileByNioFile(path) ?: fileSystem.refreshAndFindFileByNioFile(path)
