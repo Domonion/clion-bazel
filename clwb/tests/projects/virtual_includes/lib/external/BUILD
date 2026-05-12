@@ -14,3 +14,9 @@ cc_library(
     include_prefix = "external",
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "src_lib",
+    srcs = ["external_source.cc"],
+    visibility = ["//visibility:public"],
+)

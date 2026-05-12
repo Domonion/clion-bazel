@@ -41,6 +41,16 @@ UNSUPPORTED_FEATURES = [
     "fdo_optimize",
 ]
 
+# See https://bazel.build/reference/be/c-cpp#cc_binary.srcs.
+CPP_SOURCE_EXTENSIONS = [
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".c++",
+    ".C",
+]
+
 # Compile-time dependency attributes, grouped by type.
 DEPS = [
     "_stl",  # From cc rules
@@ -356,6 +366,24 @@ def collect_cc_compilation_context(ctx, target):
         system_includes = compilation_context.system_includes.to_list() + external_includes,
     )
 
+def is_cpp_source_file(file):
+    """Returns whether the artifact looks like a C/C++ source file."""
+
+    return any([file.basename.endswith(ext) for ext in CPP_SOURCE_EXTENSIONS])
+
+def collect_generated_cpp_sources(ctx):
+    """Returns generated C/C++ sources declared in the target's srcs."""
+
+    if not hasattr(ctx.rule.attr, "srcs"):
+        return []
+
+    return [
+        file
+        for target in ctx.rule.attr.srcs
+        for file in target.files.to_list()
+        if not file.is_source and is_cpp_source_file(file)
+    ]
+
 def collect_cpp_info(target, ctx, semantics, ide_info, ide_info_file, output_groups):
     """Updates C++-specific output groups, returns false if not a C++ target."""
 
@@ -374,7 +402,10 @@ def collect_cpp_info(target, ctx, semantics, ide_info, ide_info_file, output_gro
         rule_context = collect_cc_rule_context(ctx),
         compilation_context = collect_cc_compilation_context(ctx, target),
     )
-    resolve_files = target[CcInfoCompat].compilation_context.headers
+    resolve_files = depset(transitive = [
+        target[CcInfoCompat].compilation_context.headers,
+        depset(collect_generated_cpp_sources(ctx)),
+    ])
 
     # TODO(brendandouglas): target to cpp files only
     compile_files = target[OutputGroupInfo].compilation_outputs if hasattr(target[OutputGroupInfo], "compilation_outputs") else depset([])

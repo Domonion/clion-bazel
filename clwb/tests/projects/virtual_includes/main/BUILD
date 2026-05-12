@@ -1,5 +1,18 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 
+genrule(
+    name = "generate_source",
+    srcs = [],
+    outs = ["generated_source.cc"],
+    cmd = r"""echo 'int generated_source() { return 42; }' > $@""",
+)
+
+cc_binary(
+    name = "generated_source",
+    srcs = ["generated_source.cc"],
+    visibility = ["//visibility:public"],
+)
+
 cc_binary(
     name = "main",
     srcs = ["main.cc"],
@@ -12,6 +25,7 @@ cc_binary(
         "//lib/strip_absolut:lib",
         "//lib/strip_relative:lib",
         "@clwb_virtual_includes_external//:gen",
+        "@clwb_virtual_includes_external//:src_lib",
     ],
 )
 

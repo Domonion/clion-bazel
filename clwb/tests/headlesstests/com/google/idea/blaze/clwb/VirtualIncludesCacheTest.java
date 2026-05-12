@@ -23,8 +23,13 @@ import static com.google.idea.blaze.clwb.base.Assertions.assertWorkspaceHeader;
 import static com.google.idea.blaze.clwb.base.Utils.setIncludesCacheEnabled;
 
 import com.google.idea.blaze.clwb.base.ClwbHeadlessTestCase;
-import com.google.idea.testing.headless.BazelVersionRule;
-import org.junit.Rule;
+import com.google.idea.blaze.cpp.sync.HeaderCacheService;
+import com.intellij.openapi.vfs.LocalFileSystem;
+import com.intellij.util.system.OS;
+import com.jetbrains.cidr.lang.CLanguageKind;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -33,7 +38,7 @@ import org.junit.runners.JUnit4;
 public class VirtualIncludesCacheTest extends ClwbHeadlessTestCase {
 
   @Test
-  public void testClwb() {
+  public void testClwb() throws Exception {
     setIncludesCacheEnabled(true);
 
     final var errors = runSync(defaultSyncParams().build());
@@ -42,6 +47,8 @@ public class VirtualIncludesCacheTest extends ClwbHeadlessTestCase {
     checkIncludes();
     checkImplDeps();
     checkCoptIncludes();
+    checkGeneratedSourceCache();
+    checkExternalSourceCache();
   }
 
   private void checkIncludes() {
@@ -93,5 +100,45 @@ public class VirtualIncludesCacheTest extends ClwbHeadlessTestCase {
 
     assertContainsHeader("strip_relative.h", compilerSettings);
     assertCachedHeader("strip_relative.h", compilerSettings, myProject, /* symlink = */ true);
+  }
+
+  private void checkGeneratedSourceCache() throws IOException {
+    final var service = HeaderCacheService.of(myProject);
+    final var generatedSource = findCachedFile(service, Path.of("main", "generated_source.cc"));
+
+    final var file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(generatedSource);
+    assertThat(file).isNotNull();
+    assertThat(file.toNioPath().startsWith(service.getCacheDirectory())).isTrue();
+
+    final var configurations = getWorkspace().getConfigurationsForFile(file);
+    assertThat(configurations).hasSize(1);
+    assertThat(configurations.get(0).getCompilerSettings(CLanguageKind.CPP, file)).isNotNull();
+  }
+
+  private void checkExternalSourceCache() throws IOException {
+    final var service = HeaderCacheService.of(myProject);
+    final var externalSource = findCachedFile(service, Path.of("external_source.cc"));
+
+    assertThat(externalSource.startsWith(service.getCacheDirectory())).isTrue();
+    if (!OS.CURRENT.equals(OS.Windows)) {
+      assertThat(Files.isSymbolicLink(externalSource)).isTrue();
+    }
+
+    final var file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(externalSource);
+    assertThat(file).isNotNull();
+    assertThat(file.toNioPath().startsWith(service.getCacheDirectory())).isTrue();
+
+    final var configurations = getWorkspace().getConfigurationsForFile(file);
+    assertThat(configurations).hasSize(1);
+    assertThat(configurations.get(0).getCompilerSettings(CLanguageKind.CPP, file)).isNotNull();
+  }
+
+  private static Path findCachedFile(HeaderCacheService service, Path suffix) throws IOException {
+    try (var files = Files.walk(service.getCacheDirectory())) {
+      return files
+          .filter(path -> path.endsWith(suffix))
+          .findFirst()
+          .orElseThrow(() -> new AssertionError(suffix + " was not cached"));
+    }
   }
 }
