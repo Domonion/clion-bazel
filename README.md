@@ -1,7 +1,8 @@
 IMPORTANT
+
 In Clion:
 1. 2 x shift
-2. Action
+2. Actions
 3. Edit custom properies
 4. `bazel.cpp.header.cache.enabled=true`
 
